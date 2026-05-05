@@ -1,0 +1,20 @@
+{
+  "name": "llm-client-examples",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "structured-output": "tsx structured-output.ts",
+    "intent-registry": "tsx intent-registry.ts",
+    "streaming": "tsx streaming.ts",
+    "multi-provider": "tsx multi-provider.ts",
+    "error-handling": "tsx error-handling.ts"
+  },
+  "dependencies": {
+    "@antialias/llm-client": "^1.7.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0"
+  }
+}

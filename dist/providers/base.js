@@ -1,0 +1,140 @@
+import { LLMJsonParseError } from "../types.js";
+import { buildFeedbackPrompt } from "../retry.js";
+/**
+ * Base class for LLM providers
+ *
+ * Provides common functionality for building prompts and handling
+ * validation feedback.
+ */
+export class BaseProvider {
+    constructor(config) {
+        this.config = config;
+    }
+    get name() {
+        return this.config.name;
+    }
+    /**
+     * Build the prompt with schema context and validation feedback
+     *
+     * The prompt is structured as:
+     * 1. User's original prompt
+     * 2. Schema documentation (extracted from Zod .describe() annotations)
+     * 3. Validation feedback (if retrying after a failed attempt)
+     */
+    buildPrompt(request) {
+        let prompt = request.prompt;
+        // Add schema documentation
+        prompt += this.buildSchemaDocumentation(request.jsonSchema);
+        // Add validation feedback if retrying
+        if (request.validationFeedback) {
+            prompt += buildFeedbackPrompt(request.validationFeedback);
+        }
+        return prompt;
+    }
+    /**
+     * Build human-readable documentation from the JSON schema
+     *
+     * Extracts descriptions from Zod's .describe() annotations and formats
+     * them as clear instructions for the LLM.
+     */
+    buildSchemaDocumentation(schema) {
+        const docs = [];
+        docs.push("\n\n## Response Format\n");
+        docs.push("Respond with JSON matching the following structure:\n");
+        // Extract and format field descriptions
+        const fieldDocs = this.extractFieldDescriptions(schema);
+        if (fieldDocs.length > 0) {
+            docs.push("\n### Field Descriptions\n");
+            docs.push(fieldDocs.join("\n"));
+        }
+        // Include the schema structure for reference
+        docs.push("\n\n### JSON Schema\n```json\n");
+        docs.push(JSON.stringify(schema, null, 2));
+        docs.push("\n```");
+        return docs.join("");
+    }
+    /**
+     * Recursively extract field descriptions from JSON schema
+     */
+    extractFieldDescriptions(schema, path = "") {
+        const descriptions = [];
+        // Handle schema description at current level
+        if (typeof schema.description === "string" && schema.description) {
+            const fieldName = path || "Response";
+            descriptions.push(`- **${fieldName}**: ${schema.description}`);
+        }
+        // Handle object properties
+        if (schema.properties && typeof schema.properties === "object") {
+            const properties = schema.properties;
+            for (const [key, value] of Object.entries(properties)) {
+                const fieldPath = path ? `${path}.${key}` : key;
+                descriptions.push(...this.extractFieldDescriptions(value, fieldPath));
+            }
+        }
+        // Handle array items
+        if (schema.items && typeof schema.items === "object") {
+            const itemPath = path ? `${path}[]` : "items";
+            descriptions.push(...this.extractFieldDescriptions(schema.items, itemPath));
+        }
+        // Handle anyOf/oneOf (for nullable types, unions, etc.)
+        for (const key of ["anyOf", "oneOf", "allOf"]) {
+            const variants = schema[key];
+            if (Array.isArray(variants)) {
+                for (const variant of variants) {
+                    if (variant && typeof variant === "object") {
+                        descriptions.push(...this.extractFieldDescriptions(variant, path));
+                    }
+                }
+            }
+        }
+        return descriptions;
+    }
+    /**
+     * Parse JSON response from LLM
+     */
+    parseJsonResponse(content) {
+        // Handle markdown code blocks
+        const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+        const jsonStr = jsonMatch?.[1] ? jsonMatch[1].trim() : content.trim();
+        try {
+            return JSON.parse(jsonStr);
+        }
+        catch (e) {
+            const errorMessage = e instanceof Error ? e.message : "Unknown parse error";
+            throw new LLMJsonParseError(content, errorMessage);
+        }
+    }
+    /**
+     * Parse Retry-After header value
+     * @returns milliseconds to wait, or undefined if not present
+     */
+    parseRetryAfter(headers) {
+        const retryAfter = headers.get("retry-after");
+        if (!retryAfter)
+            return undefined;
+        // Could be seconds (number) or HTTP date
+        const seconds = parseInt(retryAfter, 10);
+        if (!isNaN(seconds)) {
+            return seconds * 1000;
+        }
+        // Try parsing as HTTP date
+        const date = new Date(retryAfter);
+        if (!isNaN(date.getTime())) {
+            return Math.max(0, date.getTime() - Date.now());
+        }
+        return undefined;
+    }
+    async getRequestBaseUrl(input) {
+        if (!input.forceReal) {
+            const override = await this.config.baseUrlOverride?.({
+                provider: this.name,
+                endpoint: input.endpoint,
+                model: input.model,
+                forceReal: input.forceReal,
+            });
+            if (override)
+                return override;
+        }
+        return this.config.baseUrl;
+    }
+}
