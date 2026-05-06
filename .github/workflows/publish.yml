@@ -1,0 +1,64 @@
+name: Publish to GitHub Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 1.9.0). Omit to read from package.json."
+        required: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+            if [ "$VERSION" = "0.0.0" ]; then
+              echo "::error::No version specified and package.json is 0.0.0"
+              exit 1
+            fi
+            echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rewrite package.json for GitHub
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            pkg.name = '@antialias/llm-client';
+            pkg.version = '${{ steps.version.outputs.value }}';
+            pkg.repository = { type: 'git', url: 'https://github.com/antialias/tidepool-llm-client.git' };
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Publish
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          npm publish --access public 2>&1 || {
+            if npm view "@antialias/llm-client@${VERSION}" version --registry https://npm.pkg.github.com 2>/dev/null; then
+              echo "v${VERSION} already published — skipping"
+            else
+              exit 1
+            fi
+          }
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
